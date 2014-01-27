@@ -4,7 +4,7 @@ import re, sys, os
 prop_attrs = {}
 
 classes = {}
-
+all_class_paths = {}
 
 def uc_first(s):
     if not s:
@@ -32,12 +32,18 @@ class JavaSource:
             self.src = java_file.read()
             self.src = self.src.replace('\r', '')
 
-    def add_method_annotation(self, prop, annotation):
+    def add_property_annotation(self, prop, annotation):
         if not prop:
             raise Exception('property must not be empty')
         if not annotation:
             raise Exception('annotaion must not be empty')
         self.src = re.sub(r'^(\n*)(\s*)(public\s+\b\w+(?:<\s*\w+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\()', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
+
+    def find_property_type(self, prop):
+        if not prop:
+            raise Exception('property must not be empty')
+        m = re.search(r'^\n*\s*public\s+\b(\w+)(?:<\s*\w+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(', self.src, flags=re.MULTILINE)
+        return m.group(1)
 
     def add_class_annotation(self, annotation):
         self.src = re.sub(r'^(\n*)(\s*)(public\s+class\s+' + self.cls_short_name + ')', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
@@ -56,7 +62,7 @@ def collection_field(src, collection, many_to_many=False):
     name = collection.get('name')
     if not name:
         raise Exception('BAD tag ' + str(collection))
-    print '>>>>>>>>>>>>> processing', name
+    #print '>>>>>>>>>>>>> processing', name
     lazy = collection.get('lazy')
     fetch = collection.get('fetch')
     outer_join = collection.get('outer-join')
@@ -77,6 +83,19 @@ def collection_field(src, collection, many_to_many=False):
 
     if key_column:
         join_table_args.append('joinColumns = {@JoinColumn(name = "' + key_column + '")}')
+
+    idx = collection.find('index')
+    if not idx:
+        idx = collection.find('list-index')
+    if idx and idx.get('column'):
+        src.add_property_annotation(name, '@OrderColumn(name = "' + idx.get('column') + '")')
+
+    map_key = collection.find('map-key')
+    if map_key:
+        if map_key.get('column'):
+            src.add_property_annotation(name, '@MapKeyColumn(name = "' + map_key.get('column') + '")')
+        if map_key.get('formula'):
+            src.add_property_annotation(name, '@MapKey(name = "' + map_key.get('formula') + '")')
 
     rel = collection.find('many-to-many')
     if rel:
@@ -120,10 +139,10 @@ def collection_field(src, collection, many_to_many=False):
 
     order_by = collection.get('order-by')
     if order_by:
-        src.add_method_annotation(name, '@OrderBy("' + order_by + '")')
+        src.add_property_annotation(name, '@OrderBy("' + order_by + '")')
 
     if join_table_args:
-        src.add_method_annotation(name, '@JoinTable(' + ', '.join(join_table_args) + ')')
+        src.add_property_annotation(name, '@JoinTable(' + ', '.join(join_table_args) + ')')
 
     if many_to_many:
         ann = '@OneToMany'
@@ -131,10 +150,10 @@ def collection_field(src, collection, many_to_many=False):
         ann = '@ManyToMany'
 
     if args:
-        src.add_method_annotation(name, ann + '(' + ', '.join(args) + ')')
+        src.add_property_annotation(name, ann + '(' + ', '.join(args) + ')')
     else:
-        src.add_method_annotation(name, ann)
-    print '<<<<<<<<<<<<<< processed', ann, name
+        src.add_property_annotation(name, ann)
+    #print '<<<<<<<<<<<<<< processed', ann, name
 
 
 def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
@@ -161,14 +180,14 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
             for id_tag in cls.find_all('id', recursive=False):
                 name = id_tag.get('name')
                 if name == 'id':
-                    src.add_method_annotation(name, '@Id')
-                    src.add_method_annotation(name, '@GeneratedValue')
+                    src.add_property_annotation(name, '@Id')
+                    src.add_property_annotation(name, '@GeneratedValue')
                 else:
                     #TODO
                     pass
                 column = id_tag.get('column')
                 if column is not None and column != name:
-                    src.add_method_annotation(name, '@Column(name = "' + column + '")')
+                    src.add_property_annotation(name, '@Column(name = "' + column + '")')
                     # type = id_tag.get('type')
                 pass
 
@@ -177,11 +196,11 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                 name = prop['name']
                 index = prop.get('index')
                 if index:
-                    src.add_method_annotation(name, '@Index(name = "' + index + '")')
+                    src.add_property_annotation(name, '@Index(name = "' + index + '")')
                     src.add_import('org.hibernate.annotations.Index')
                 lazy = prop.get('lazy')
                 if lazy:
-                    src.add_method_annotation(name, '@Basic(fetch = FetchType.LAZY)')
+                    src.add_property_annotation(name, '@Basic(fetch = FetchType.LAZY)')
                 col_args = []
                 column = prop.get('column')
                 classes[cls_name][column] = name
@@ -192,14 +211,14 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                     col_args.append('length = "' + length + '"')
                 formula = prop.get('formula')
                 if formula:
-                    src.add_method_annotation(name, '@Formula("' + formula + '")')
+                    src.add_property_annotation(name, '@Formula("' + formula + '")')
                     src.add_import('org.hibernate.annotations.Formula')
                 unique = prop.get('unique')
                 if unique:
                     col_args.append('unique = true')
                     # type = prop.get('type')
                 if col_args:
-                    src.add_method_annotation(name, '@Column(' + ', '.join(col_args) + ')')
+                    src.add_property_annotation(name, '@Column(' + ', '.join(col_args) + ')')
                 unique_key = prop.get('unique-key')
                 if unique_key:
                     unique_args.append(column)
@@ -248,12 +267,12 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                     join_col_args.append('updateable = false')
 
                 if outer_join == 'true':
-                    src.add_method_annotation(name, '@Fetch(FetchMode.JOIN)')
+                    src.add_property_annotation(name, '@Fetch(FetchMode.JOIN)')
                 elif outer_join:
                     raise Exception('outer-join type ' + outer_join + ' not handled')
                 not_found = entity.get('not-found')
                 if not_found == 'ignore':
-                    src.add_method_annotation(name, '@NotFound(action = NotFoundAction.IGNORE)')
+                    src.add_property_annotation(name, '@NotFound(action = NotFoundAction.IGNORE)')
                     src.add_import('org.hibernate.annotations.NotFound')
                     src.add_import('org.hibernate.annotations.NotFoundAction')
 
@@ -262,12 +281,12 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                     unique_args.append(column)
 
                 if join_col_args:
-                    src.add_method_annotation(name, '@JoinColumn(' + ', '.join(join_col_args) + ')')
+                    src.add_property_annotation(name, '@JoinColumn(' + ', '.join(join_col_args) + ')')
 
                 if many_to_one_args:
-                    src.add_method_annotation(name, '@ManyToOne(' + ', '.join(many_to_one_args) + ')')
+                    src.add_property_annotation(name, '@ManyToOne(' + ', '.join(many_to_one_args) + ')')
                 else:
-                    src.add_method_annotation(name, '@ManyToOne')
+                    src.add_property_annotation(name, '@ManyToOne')
                 pass
 
             # one-to-one entities
@@ -296,59 +315,51 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                     else:
                         raise Exception('cascade type ' + cascade + ' not handled')
                 if one_to_one_args:
-                    src.add_method_annotation(name, '@OneToOne(' + ', '.join(one_to_one_args) + ')')
+                    src.add_property_annotation(name, '@OneToOne(' + ', '.join(one_to_one_args) + ')')
                 else:
-                    src.add_method_annotation(name, '@OneToOne')
+                    src.add_property_annotation(name, '@OneToOne')
                 pass
 
             # list collections
             for collection in cls.find_all('list', recursive=False):
-                print '................ processing list', cls_short_name, collection.get('name')
+                #print '................ processing list', cls_short_name, collection.get('name')
                 collection_field(src, collection)
                 pass
 
             # set collections
             for collection in cls.find_all('set', recursive=False):
-                print '................ processing set', cls_short_name, collection.get('name')
+                #print '................ processing set', cls_short_name, collection.get('name')
                 collection_field(src, collection)
                 pass
 
             # many-to-many collections
             for collection in cls.find_all('many-to-many', recursive=False):
-                print '................ processing many-to-many', cls_short_name, collection.get('name')
+                #print '................ processing many-to-many', cls_short_name, collection.get('name')
                 collection_field(src, collection, True)
                 pass
 
             # map collections
             for m in cls.find_all('map', recursive=False):
-                # prop_attrs.update(m.attrs)
-                one_to_many_args = []
-                cascade = m.get('cascade')
-                # inverse = m.get('inverse')
-                # name = m.get('name')
-                # order_by = m.get('order-by')
-                if cascade:
-                    if cascade == 'all':
-                        one_to_many_args.append('cascade = CascadeType.ALL')
-                        pass
-                    elif cascade == 'merge':
-                        one_to_many_args.append('cascade = CascadeType.MERGE')
-                        pass
-                    elif cascade == 'all-delete-orphan':
-                        one_to_many_args.append('cascade = CascadeType.ALL')
-                        one_to_many_args.append('orphanRemoval = true')
-                        pass
-                    elif cascade == 'delete-orphan':
-                        one_to_many_args.append('orphanRemoval = true')
-                        pass
-                    else:
-                        raise Exception('cascade type ' + cascade + ' not handled')
+                collection_field(src, m)
                 pass
 
             for component in cls.find_all('component', recursive=False):
-                # prop_attrs.update(component.attrs)
                 name = component.get('name')
-                # class = component.get('class')
+                src.add_property_annotation(name, '@Embedded')
+                attr_override_args = []
+                for p in component.find_all('property', recursive=False):
+                    attr_override_args.append('@AttributeOverride(name = "' + p['name'] + '", column = @Column(name = "' + p['column'] + '") )')
+                if attr_override_args:
+                    src.add_property_annotation(name, '@AttributeOverrides({' + ', '.join(attr_override_args) + '})')
+
+                target_cls = component.get('class')
+                if target_cls:
+                    target_cls = target_cls.split('.')[-1]
+                else:
+                    target_cls = target_cls.find_property_type(name)
+                target_src = JavaSource(all_class_paths[target_cls])
+                target_src.add_class_annotation('@Embeddable')
+                target_src.write()
                 pass
 
             for comp_id in cls.find_all('composite-id', recursive=False):
@@ -363,6 +374,13 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
 
 
 if __name__ == '__main__':
+    java_src_base='../jazva/src/main/java'
+    for dp, dn, file_names in os.walk(java_src_base):
+        for f in file_names:
+            path_split = os.path.splitext(f)
+            if path_split[1] == '.java':
+                all_class_paths[path_split[0]] = os.path.join(dp, f)
+
     for hbm in sys.argv[1:]:
         print '------------ processing', hbm
         process_hbm(hbm)
