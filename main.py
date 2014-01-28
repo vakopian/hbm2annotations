@@ -1,10 +1,9 @@
 from bs4 import BeautifulSoup
 import re, sys, os
 
-prop_attrs = {}
-
 classes = {}
 all_class_paths = {}
+embeddable_classes = {}
 
 def uc_first(s):
     if not s:
@@ -20,29 +19,48 @@ def lc_first(s):
 
 def inverse_key_column_to_property(inverse_key_column):
     if inverse_key_column[-2:].lower() == 'id':
-        return inverse_key_column[0:-2]
-    raise Exception('Could not determine property name from key column ' + inverse_key_column)
+        return lc_first(inverse_key_column[0:-2])
+    return lc_first(inverse_key_column)
 
 
 class JavaSource:
     def __init__(self, java_file_path):
         self.java_file_path = java_file_path
         self.cls_short_name = os.path.splitext(os.path.basename(java_file_path))[0]
+        self.annotated_props = {}
         with open(java_file_path) as java_file:
             self.src = java_file.read()
             self.src = self.src.replace('\r', '')
+            self.properties = [lc_first(m.group(1)) for m in re.finditer(r'^\n*\s*public\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)(\w+)\s*\(', self.src, flags=re.MULTILINE)]
+            self.superclass = None
+            m = re.search(r'^\n*\s*public\s+class\s+' + self.cls_short_name + r'\s+extends\s+(\w+)', self.src, flags=re.MULTILINE)
+            if m:
+                self.superclass = JavaSource(all_class_paths[m.group(1)])
+
+    def has_property(self, prop):
+        return prop in self.properties
 
     def add_property_annotation(self, prop, annotation):
         if not prop:
             raise Exception('property must not be empty')
         if not annotation:
             raise Exception('annotaion must not be empty')
-        self.src = re.sub(r'^(\n*)(\s*)(public\s+\b\w+(?:<\s*\w+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\()', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
+        if self.has_property(prop):
+            self.src = re.sub(r'^(\n*)(\s*)(public\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\()', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
+            self.mark_as_mapped(prop)
+        elif self.superclass:
+            self.superclass.add_property_annotation(prop, annotation)
+            #todo: may need a @MappedSuperclass annotation
+        else:
+            raise Exception('could not find property ' + prop + ' in class ' + self.cls_short_name)
+
+    def mark_as_mapped(self, prop):
+        self.annotated_props[prop] = prop
 
     def find_property_type(self, prop):
         if not prop:
             raise Exception('property must not be empty')
-        m = re.search(r'^\n*\s*public\s+\b(\w+)(?:<\s*\w+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(', self.src, flags=re.MULTILINE)
+        m = re.search(r'^\n*\s*public\s+\b(\w+)(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(', self.src, flags=re.MULTILINE)
         return m.group(1)
 
     def add_class_annotation(self, annotation):
@@ -55,6 +73,20 @@ class JavaSource:
         with open(self.java_file_path, 'w') as java_file:
             java_file.write(self.src)
 
+    def get_property_annotations(self, prop):
+        ann = []
+        for m in re.finditer(r'^((?:\n\s*@\w+(?:\(.*\n)?\n*)+)\s*public\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(', self.src, flags=re.MULTILINE):
+            ann += m.group(1).split()
+        #print '.........................property', prop, 'is annotated with', ann
+        return ann
+
+    def add_transient_annotations(self):
+        for prop in self.properties:
+            if prop not in self.annotated_props:
+                annotations = self.get_property_annotations(prop)
+                if '@Transient' not in annotations and '@OneToOne' not in annotations:
+                    self.add_property_annotation(prop, '@Transient')
+
 
 def collection_field(src, collection, many_to_many=False):
     args = []
@@ -62,7 +94,6 @@ def collection_field(src, collection, many_to_many=False):
     name = collection.get('name')
     if not name:
         raise Exception('BAD tag ' + str(collection))
-    #print '>>>>>>>>>>>>> processing', name
     lazy = collection.get('lazy')
     fetch = collection.get('fetch')
     outer_join = collection.get('outer-join')
@@ -73,6 +104,7 @@ def collection_field(src, collection, many_to_many=False):
         args.append('fetch = FetchType.LAZY')
 
     key_column = None
+    not_null = None
     key = collection.find('key')
     if key:
         key_column = key.get('column')
@@ -80,9 +112,13 @@ def collection_field(src, collection, many_to_many=False):
             kc = key.find('column')
             if kc:
                 key_column = kc['name']
+                not_null = kc.get('not-null')
 
     if key_column:
-        join_table_args.append('joinColumns = {@JoinColumn(name = "' + key_column + '")}')
+        not_null_arg = ''
+        if not_null == 'true':
+            not_null_arg = ', nullable = false'
+        join_table_args.append('joinColumns = {@JoinColumn(name = "' + key_column + '"' + not_null_arg + ')}')
 
     idx = collection.find('index')
     if not idx:
@@ -145,18 +181,17 @@ def collection_field(src, collection, many_to_many=False):
         src.add_property_annotation(name, '@JoinTable(' + ', '.join(join_table_args) + ')')
 
     if many_to_many:
-        ann = '@OneToMany'
-    else:
         ann = '@ManyToMany'
+    else:
+        ann = '@OneToMany'
 
     if args:
         src.add_property_annotation(name, ann + '(' + ', '.join(args) + ')')
     else:
         src.add_property_annotation(name, ann)
-    #print '<<<<<<<<<<<<<< processed', ann, name
 
 
-def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
+def process_hbm(hbm, java_src_base):
     with open(hbm) as hbm_file:
         soup = BeautifulSoup(hbm_file, 'xml')
         for cls in soup.find('hibernate-mapping').find_all('class', recursive=False):
@@ -166,7 +201,7 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
             table = cls.get('table')
             java_file_path = java_src_base + '/' + cls_name.replace('.', '/') + '.java'
             if not os.path.exists(java_file_path):
-                print 'skipping class', cls_name
+                print 'skipping class', cls_name, 'corresponding java file', java_file_path, 'does not exist'
                 continue
 
             print 'processing class', cls_short_name, '...',
@@ -183,7 +218,7 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                     src.add_property_annotation(name, '@Id')
                     src.add_property_annotation(name, '@GeneratedValue')
                 else:
-                    #TODO
+                    raise Exception("id with name " + name + " in class " + cls_name)
                     pass
                 column = id_tag.get('column')
                 if column is not None and column != name:
@@ -208,7 +243,7 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                     col_args.append('name = "' + column + '"')
                 length = prop.get('length')
                 if length:
-                    col_args.append('length = "' + length + '"')
+                    col_args.append('length = ' + length)
                 formula = prop.get('formula')
                 if formula:
                     src.add_property_annotation(name, '@Formula("' + formula + '")')
@@ -222,6 +257,7 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                 unique_key = prop.get('unique-key')
                 if unique_key:
                     unique_args.append(column)
+                src.mark_as_mapped(name)
                 pass
 
             # many-to-one entities
@@ -268,6 +304,8 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
 
                 if outer_join == 'true':
                     src.add_property_annotation(name, '@Fetch(FetchMode.JOIN)')
+                    src.add_import('org.hibernate.annotations.Fetch')
+                    src.add_import('org.hibernate.annotations.FetchMode')
                 elif outer_join:
                     raise Exception('outer-join type ' + outer_join + ' not handled')
                 not_found = entity.get('not-found')
@@ -322,19 +360,16 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
 
             # list collections
             for collection in cls.find_all('list', recursive=False):
-                #print '................ processing list', cls_short_name, collection.get('name')
                 collection_field(src, collection)
                 pass
 
             # set collections
             for collection in cls.find_all('set', recursive=False):
-                #print '................ processing set', cls_short_name, collection.get('name')
                 collection_field(src, collection)
                 pass
 
             # many-to-many collections
             for collection in cls.find_all('many-to-many', recursive=False):
-                #print '................ processing many-to-many', cls_short_name, collection.get('name')
                 collection_field(src, collection, True)
                 pass
 
@@ -347,8 +382,15 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                 name = component.get('name')
                 src.add_property_annotation(name, '@Embedded')
                 attr_override_args = []
-                for p in component.find_all('property', recursive=False):
-                    attr_override_args.append('@AttributeOverride(name = "' + p['name'] + '", column = @Column(name = "' + p['column'] + '") )')
+                component_attributes = []
+                component_attributes += component.find_all('property', recursive=False)
+                component_attributes += component.find_all('many-to-one', recursive=False)
+                for p in component_attributes:
+                    p_name = p['name']
+                    p_column = p.get('column')
+                    if not p_column:
+                        p_column = p_name
+                    attr_override_args.append('@AttributeOverride(name = "' + p_name + '", column = @Column(name = "' + p_column + '") )')
                 if attr_override_args:
                     src.add_property_annotation(name, '@AttributeOverrides({' + ', '.join(attr_override_args) + '})')
 
@@ -356,19 +398,24 @@ def process_hbm(hbm, java_src_base='../jazva/src/main/java'):
                 if target_cls:
                     target_cls = target_cls.split('.')[-1]
                 else:
-                    target_cls = target_cls.find_property_type(name)
-                target_src = JavaSource(all_class_paths[target_cls])
-                target_src.add_class_annotation('@Embeddable')
-                target_src.write()
+                    target_cls = src.find_property_type(name)
+                if target_cls not in embeddable_classes:
+                    embeddable_classes[target_cls] = target_cls
+                    target_src = JavaSource(all_class_paths[target_cls])
+                    target_src.add_import('javax.persistence.Embeddable')
+                    target_src.add_class_annotation('@Embeddable')
+                    target_src.write()
                 pass
 
             for comp_id in cls.find_all('composite-id', recursive=False):
+                print 'WARN: composite-id found in', cls_name, 'please annotate manually'
                 pass
 
             if unique_args:
                 src.add_class_annotation('@Table(name = "' + table + '", uniqueConstraints = { @UniqueConstraint(columnNames = {"' + '", "'.join(unique_args) + '"})})')
             else:
                 src.add_class_annotation('@Table(name = "' + table + '")')
+            src.add_transient_annotations()
             src.write()
             print 'done'
 
@@ -383,7 +430,5 @@ if __name__ == '__main__':
 
     for hbm in sys.argv[1:]:
         print '------------ processing', hbm
-        process_hbm(hbm)
-        #for k in  prop_attrs.keys():
-        #    print k,"= collection['" + k + "']"
+        process_hbm(hbm, java_src_base)
 
