@@ -1,3 +1,4 @@
+from lxml.html.diff import copy_annotations
 from bs4 import BeautifulSoup
 import re, sys, os
 
@@ -23,11 +24,28 @@ def inverse_key_column_to_property(inverse_key_column):
     return lc_first(inverse_key_column)
 
 
+class JavaAnn:
+    def __init__(self, ann, params=None, target_class=None):
+        self.name = ann
+        self.target_class = target_class
+        if params:
+            if isinstance(params, basestring):
+                self.params = [params]
+            self.params = params
+
+    def __str__(self):
+        if self.params:
+            return self.name + "(" + ", ".join(self.params) + ")"
+        return self.name
+
 class JavaSource:
     def __init__(self, java_file_path):
         self.java_file_path = java_file_path
         self.cls_short_name = os.path.splitext(os.path.basename(java_file_path))[0]
         self.annotated_props = {}
+        self.prop_annotations = {}
+        self.class_annotations = []
+        self.imports = []
         with open(java_file_path) as java_file:
             self.src = java_file.read()
             self.src = self.src.replace('\r', '')
@@ -42,10 +60,26 @@ class JavaSource:
         return prop in self.properties
 
     def add_property_annotation(self, prop, annotation):
+        if not isinstance(annotation, JavaAnn):
+            raise Exception("annotation must be JavaAnn object")
+        if prop not in self.prop_annotations:
+            self.prop_annotations[prop] = [annotation]
+        else:
+            self.prop_annotations[prop].append(annotation)
+
+    def find_scheduled(self, ann_name, target_class='ANY'):
+        res = []
+        for prop, annotations in self.prop_annotations:
+            for ann in annotations:
+                if ann.name == ann_name and ((target_class == 'ANY' and ann.target_class) or (target_class and ann.target_class == target_class)):
+                    res.append((prop, ann))
+        return res
+
+    def _do_add_property_annotation(self, prop, annotation):
         if not prop:
             raise Exception('property must not be empty')
         if not annotation:
-            raise Exception('annotaion must not be empty')
+            raise Exception('annotation must not be empty')
         if self.has_property(prop):
             self.src = re.sub(r'^(\n*)(\s*)((?:public|protected|private)\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(\s*\))', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
             self.mark_as_mapped(prop)
@@ -65,12 +99,29 @@ class JavaSource:
         return m.group(1)
 
     def add_class_annotation(self, annotation):
+        self.class_annotations.append(annotation)
+
+    def _do_add_class_annotation(self, annotation):
         self.src = re.sub(r'^(\n*)(\s*)(public\s+class\s+' + self.cls_short_name + ')', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
 
     def add_import(self, imprt):
+        self.imports.append(imprt)
+
+    def _do_add_import(self, imprt):
         self.src = re.sub(r'^(package\s+[\w\.]+;)' + "\n", r'\1' + '\n\nimport ' + imprt + ";\n", self.src, 1, flags=re.MULTILINE)
 
     def write(self):
+        for imprt in self.imports:
+            self._do_add_import(imprt)
+
+        for ann in self.class_annotations:
+            self._do_add_class_annotation(ann)
+
+        for (prop, annotations) in self.prop_annotations:
+            for ann in annotations:
+                self._do_add_property_annotation(prop, ann)
+
+        self.add_transient_annotations()
         with open(self.java_file_path, 'w') as java_file:
             java_file.write(self.src)
 
@@ -86,7 +137,7 @@ class JavaSource:
             if prop not in self.annotated_props:
                 annotations = self.get_property_annotations(prop)
                 if '@Transient' not in annotations and '@OneToOne' not in annotations and '@ManyToOne' not in annotations and '@OneToMany' not in annotations:
-                    self.add_property_annotation(prop, '@Transient')
+                    self.add_property_annotation(prop, JavaAnn('@Transient'))
 
 
 def collection_field(src, collection, many_to_many=False):
@@ -125,15 +176,16 @@ def collection_field(src, collection, many_to_many=False):
     if not idx:
         idx = collection.find('list-index')
     if idx and idx.get('column'):
-        src.add_property_annotation(name, '@OrderColumn(name = "' + idx.get('column') + '")')
+        src.add_property_annotation(name, JavaAnn('@OrderColumn', 'name = "' + idx.get('column') + '"'))
 
     map_key = collection.find('map-key')
     if map_key:
         if map_key.get('column'):
-            src.add_property_annotation(name, '@MapKeyColumn(name = "' + map_key.get('column') + '")')
+            src.add_property_annotation(name, JavaAnn('@MapKeyColumn', 'name = "' + map_key.get('column') + '"'))
         if map_key.get('formula'):
-            src.add_property_annotation(name, '@MapKey(name = "' + map_key.get('formula') + '")')
+            src.add_property_annotation(name, JavaAnn('@MapKey', 'name = "' + map_key.get('formula') + '"'))
 
+    target_class = None
     rel = collection.find('many-to-many')
     if rel:
         many_to_many = (rel.get('unique') != 'true')
@@ -144,6 +196,7 @@ def collection_field(src, collection, many_to_many=False):
         rel = collection.find('one-to-many')
         if rel:
             many_to_many = False
+            target_class = rel.get('class')
 
     if table:
         join_table_args.append('name = "' + table + '"')
@@ -177,10 +230,10 @@ def collection_field(src, collection, many_to_many=False):
 
     order_by = collection.get('order-by')
     if order_by:
-        src.add_property_annotation(name, '@OrderBy("' + order_by + '")')
+        src.add_property_annotation(name, JavaAnn('@OrderBy', '"' + order_by + '"'))
 
     if join_table_args and not mapped_by:
-        src.add_property_annotation(name, '@JoinTable(' + ', '.join(join_table_args) + ')')
+        src.add_property_annotation(name, JavaAnn('@JoinTable', join_table_args))
 
     if many_to_many:
         ann = '@ManyToMany'
@@ -188,9 +241,9 @@ def collection_field(src, collection, many_to_many=False):
         ann = '@OneToMany'
 
     if args:
-        src.add_property_annotation(name, ann + '(' + ', '.join(args) + ')')
+        src.add_property_annotation(name, JavaAnn(ann, args, target_class))
     else:
-        src.add_property_annotation(name, ann)
+        src.add_property_annotation(name, JavaAnn(ann, None, target_class))
 
 
 def process_hbm(hbm, java_src_base):
@@ -217,14 +270,14 @@ def process_hbm(hbm, java_src_base):
             for id_tag in cls.find_all('id', recursive=False):
                 name = id_tag.get('name')
                 if name == 'id':
-                    src.add_property_annotation(name, '@Id')
-                    src.add_property_annotation(name, '@GeneratedValue')
+                    src.add_property_annotation(name, JavaAnn('@Id'))
+                    src.add_property_annotation(name, JavaAnn('@GeneratedValue'))
                 else:
                     raise Exception("id with name " + name + " in class " + cls_name)
                     pass
                 column = id_tag.get('column')
                 if column is not None and column != name:
-                    src.add_property_annotation(name, '@Column(name = "' + column + '")')
+                    src.add_property_annotation(name, JavaAnn('@Column', 'name = "' + column + '"'))
                     # type = id_tag.get('type')
                 pass
 
@@ -233,11 +286,11 @@ def process_hbm(hbm, java_src_base):
                 name = prop['name']
                 index = prop.get('index')
                 if index:
-                    src.add_property_annotation(name, '@Index(name = "' + index + '")')
+                    src.add_property_annotation(name, JavaAnn('@Index', 'name = "' + index + '"'))
                     src.add_import('org.hibernate.annotations.Index')
                 lazy = prop.get('lazy')
                 if lazy:
-                    src.add_property_annotation(name, '@Basic(fetch = FetchType.LAZY)')
+                    src.add_property_annotation(name, JavaAnn('@Basic', 'fetch = FetchType.LAZY'))
                 col_args = []
                 column = prop.get('column')
                 classes[cls_name][column] = name
@@ -248,14 +301,14 @@ def process_hbm(hbm, java_src_base):
                     col_args.append('length = ' + length)
                 formula = prop.get('formula')
                 if formula:
-                    src.add_property_annotation(name, '@Formula("' + formula + '")')
+                    src.add_property_annotation(name, JavaAnn('@Formula', '"' + formula + '"'))
                     src.add_import('org.hibernate.annotations.Formula')
                 unique = prop.get('unique')
                 if unique:
                     col_args.append('unique = true')
                     # type = prop.get('type')
                 if col_args:
-                    src.add_property_annotation(name, '@Column(' + ', '.join(col_args) + ')')
+                    src.add_property_annotation(name, JavaAnn('@Column', col_args))
                 unique_key = prop.get('unique-key')
                 if unique_key:
                     unique_args.append(column)
@@ -269,6 +322,7 @@ def process_hbm(hbm, java_src_base):
                 name = entity.get('name')
                 lazy = entity.get('lazy')
                 fetch = entity.get('fetch')
+                target_class = entity.get('class')
                 # https://forum.hibernate.org/viewtopic.php?f=1&t=929178&sid=2eb67ddf54a436cbbf601b3adf53fb63
                 outer_join = entity.get('outer-join')
                 if lazy == 'false' or fetch == 'join':
@@ -305,14 +359,14 @@ def process_hbm(hbm, java_src_base):
                     join_col_args.append('updatable = false')
 
                 if outer_join == 'true':
-                    src.add_property_annotation(name, '@Fetch(FetchMode.JOIN)')
+                    src.add_property_annotation(name, JavaAnn('@Fetch', 'FetchMode.JOIN'))
                     src.add_import('org.hibernate.annotations.Fetch')
                     src.add_import('org.hibernate.annotations.FetchMode')
                 elif outer_join:
                     raise Exception('outer-join type ' + outer_join + ' not handled')
                 not_found = entity.get('not-found')
                 if not_found == 'ignore':
-                    src.add_property_annotation(name, '@NotFound(action = NotFoundAction.IGNORE)')
+                    src.add_property_annotation(name, JavaAnn('@NotFound', 'action = NotFoundAction.IGNORE'))
                     src.add_import('org.hibernate.annotations.NotFound')
                     src.add_import('org.hibernate.annotations.NotFoundAction')
 
@@ -321,12 +375,12 @@ def process_hbm(hbm, java_src_base):
                     unique_args.append(column)
 
                 if join_col_args:
-                    src.add_property_annotation(name, '@JoinColumn(' + ', '.join(join_col_args) + ')')
+                    src.add_property_annotation(name, JavaAnn('@JoinColumn', join_col_args))
 
                 if many_to_one_args:
-                    src.add_property_annotation(name, '@ManyToOne(' + ', '.join(many_to_one_args) + ')')
+                    src.add_property_annotation(name, JavaAnn('@ManyToOne', many_to_one_args, target_class))
                 else:
-                    src.add_property_annotation(name, '@ManyToOne')
+                    src.add_property_annotation(name, JavaAnn('@ManyToOne', None, target_class))
                 pass
 
             # one-to-one entities
@@ -355,9 +409,9 @@ def process_hbm(hbm, java_src_base):
                     else:
                         raise Exception('cascade type ' + cascade + ' not handled')
                 if one_to_one_args:
-                    src.add_property_annotation(name, '@OneToOne(' + ', '.join(one_to_one_args) + ')')
+                    src.add_property_annotation(name, JavaAnn('@OneToOne', one_to_one_args))
                 else:
-                    src.add_property_annotation(name, '@OneToOne')
+                    src.add_property_annotation(name, JavaAnn('@OneToOne'))
                 pass
 
             # list collections
@@ -382,7 +436,7 @@ def process_hbm(hbm, java_src_base):
 
             for component in cls.find_all('component', recursive=False):
                 name = component.get('name')
-                src.add_property_annotation(name, '@Embedded')
+                src.add_property_annotation(name, JavaAnn('@Embedded'))
                 attr_override_args = []
                 component_attributes = []
                 component_attributes += component.find_all('property', recursive=False)
@@ -394,7 +448,7 @@ def process_hbm(hbm, java_src_base):
                         p_column = p_name
                     attr_override_args.append('@AttributeOverride(name = "' + p_name + '", column = @Column(name = "' + p_column + '") )')
                 if attr_override_args:
-                    src.add_property_annotation(name, '@AttributeOverrides({' + ', '.join(attr_override_args) + '})')
+                    src.add_property_annotation(name, JavaAnn('@AttributeOverrides', '{' + ', '.join(attr_override_args) + '}'))
 
                 target_cls = component.get('class')
                 if target_cls:
@@ -417,10 +471,22 @@ def process_hbm(hbm, java_src_base):
                 src.add_class_annotation('@Table(name = "' + table + '", uniqueConstraints = { @UniqueConstraint(columnNames = {"' + '", "'.join(unique_args) + '"})})')
             else:
                 src.add_class_annotation('@Table(name = "' + table + '")')
-            src.add_transient_annotations()
-            src.write()
-            print 'done'
 
+            return cls_name, src
+
+
+def link_peer_fields(sources):
+    sources = {}
+    for cls_name, src in sources:
+        #y = [(prop, ann, annotations) for ann in annotations for prop, annotations in src.prop_annotations if ann.name == '@OneToMany']
+        for prop, one_to_many in src.find_scheduled('@OneToMany'):
+            target_src = sources[one_to_many.target_class]
+            matches = target_src.find_scheduled('@ManyToOne', cls_name)
+            if matches:
+                if len(matches) == 1:
+                    peer_prop, many_to_one = matches[0]
+
+    pass
 
 if __name__ == '__main__':
     java_src_base='../jazva/src/main/java'
@@ -430,7 +496,13 @@ if __name__ == '__main__':
             if path_split[1] == '.java':
                 all_class_paths[path_split[0]] = os.path.join(dp, f)
 
+    sources = {}
     for hbm in sys.argv[1:]:
         print '------------ processing', hbm
-        process_hbm(hbm, java_src_base)
+        cls_name, src = process_hbm(hbm, java_src_base)
+        sources[cls_name] = src
+
+    link_peer_fields(sources)
+    for src in sources:
+        src.write()
 
