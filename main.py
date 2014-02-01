@@ -31,7 +31,8 @@ class JavaSource:
         with open(java_file_path) as java_file:
             self.src = java_file.read()
             self.src = self.src.replace('\r', '')
-            self.properties = [lc_first(m.group(1)) for m in re.finditer(r'^\n*\s*public\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)(\w+)\s*\(', self.src, flags=re.MULTILINE)]
+            self.src = self.src.replace(' * To change this template use File | Settings | File Templates.\n', '')
+            self.properties = [lc_first(m.group(1)) for m in re.finditer(r'^\n*\s*(?:public|protected|private)\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)(\w+)\s*\(\s*\)', self.src, flags=re.MULTILINE)]
             self.superclass = None
             m = re.search(r'^\n*\s*public\s+class\s+' + self.cls_short_name + r'\s+extends\s+(\w+)', self.src, flags=re.MULTILINE)
             if m:
@@ -46,7 +47,7 @@ class JavaSource:
         if not annotation:
             raise Exception('annotaion must not be empty')
         if self.has_property(prop):
-            self.src = re.sub(r'^(\n*)(\s*)(public\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\()', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
+            self.src = re.sub(r'^(\n*)(\s*)((?:public|protected|private)\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(\s*\))', r'\1\2' + annotation + "\n" + r'\2\3', self.src, 1, flags=re.MULTILINE)
             self.mark_as_mapped(prop)
         elif self.superclass:
             self.superclass.add_property_annotation(prop, annotation)
@@ -60,7 +61,7 @@ class JavaSource:
     def find_property_type(self, prop):
         if not prop:
             raise Exception('property must not be empty')
-        m = re.search(r'^\n*\s*public\s+\b(\w+)(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(', self.src, flags=re.MULTILINE)
+        m = re.search(r'^\n*\s*(?:public|protected|private)\s+\b(\w+)(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(\s*\)', self.src, flags=re.MULTILINE)
         return m.group(1)
 
     def add_class_annotation(self, annotation):
@@ -75,7 +76,7 @@ class JavaSource:
 
     def get_property_annotations(self, prop):
         ann = []
-        for m in re.finditer(r'^((?:\n\s*@\w+(?:\(.*\n)?\n*)+)\s*public\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(', self.src, flags=re.MULTILINE):
+        for m in re.finditer(r'^((?:\n*\s*@\w+(?:\(.*\n)?\n*)+)\s*(?:public|protected|private)\s+\b\w+(?:<\s*[\w, ]+\s*>)?\s*(?:get|is)' + uc_first(prop) + r'\s*\(\s*\)', self.src, flags=re.MULTILINE):
             ann += m.group(1).split()
         #print '.........................property', prop, 'is annotated with', ann
         return ann
@@ -84,7 +85,7 @@ class JavaSource:
         for prop in self.properties:
             if prop not in self.annotated_props:
                 annotations = self.get_property_annotations(prop)
-                if '@Transient' not in annotations and '@OneToOne' not in annotations:
+                if '@Transient' not in annotations and '@OneToOne' not in annotations and '@ManyToOne' not in annotations and '@OneToMany' not in annotations:
                     self.add_property_annotation(prop, '@Transient')
 
 
@@ -167,7 +168,8 @@ def collection_field(src, collection, many_to_many=False):
         else:
             raise Exception('cascade type [' + cascade + '] not handled')
     inverse = collection.get('inverse')
-    if inverse == 'true':
+    mapped_by = inverse == 'true'
+    if mapped_by:
         if not key_column:
             raise Exception('BAD ' + str(key))
         mapped_by_prop = inverse_key_column_to_property(key_column)
@@ -177,7 +179,7 @@ def collection_field(src, collection, many_to_many=False):
     if order_by:
         src.add_property_annotation(name, '@OrderBy("' + order_by + '")')
 
-    if join_table_args:
+    if join_table_args and not mapped_by:
         src.add_property_annotation(name, '@JoinTable(' + ', '.join(join_table_args) + ')')
 
     if many_to_many:
@@ -300,7 +302,7 @@ def process_hbm(hbm, java_src_base):
                     join_col_args.append('insertable = false')
                 update = entity.get('update')
                 if update == 'false':
-                    join_col_args.append('updateable = false')
+                    join_col_args.append('updatable = false')
 
                 if outer_join == 'true':
                     src.add_property_annotation(name, '@Fetch(FetchMode.JOIN)')
