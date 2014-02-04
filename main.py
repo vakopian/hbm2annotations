@@ -159,6 +159,7 @@ class JavaSource:
 def collection_field(src, collection, many_to_many=False):
     args = []
     join_table_args = []
+    join_column_args = []
     name = collection.get('name')
     if not name:
         raise Exception('BAD tag ' + str(collection))
@@ -183,10 +184,9 @@ def collection_field(src, collection, many_to_many=False):
                 not_null = kc.get('not-null')
 
     if key_column:
-        not_null_arg = ''
         if not_null == 'true':
-            not_null_arg = ', nullable = false'
-        join_table_args.append('joinColumns = {@JoinColumn(name = "' + key_column + '"' + not_null_arg + ')}')
+            join_column_args.append('nullable = false')
+        join_column_args.append('name = "' + key_column + '"')
 
     idx = collection.find('index')
     if not idx:
@@ -248,8 +248,13 @@ def collection_field(src, collection, many_to_many=False):
     if order_by:
         src.schedule_property_annotation(name, JavaAnn('@OrderBy', '"' + order_by + '"'))
 
-    if join_table_args and not mapped_by:
-        src.schedule_property_annotation(name, JavaAnn('@JoinTable', join_table_args))
+    if not mapped_by:
+        if join_table_args:
+            if join_column_args:
+                join_table_args.append('joinColumns = {@JoinColumn(' + ', '.join(join_column_args) + ')}')
+            src.schedule_property_annotation(name, JavaAnn('@JoinTable', join_table_args))
+        elif join_column_args:
+            src.schedule_property_annotation(name, JavaAnn('@JoinColumn', join_column_args))
 
     if many_to_many:
         ann = '@ManyToMany'
@@ -507,7 +512,7 @@ def link_peer_fields(sources):
                 if len(matches) == 1:
                     peer_prop, many_to_one = matches[0]
                     print "!!!FOUND match for " + cls_name + "." + prop + " in " + one_to_many.target_class + '.' +  peer_prop
-                    src.unschedule_property_annotation(prop, '@JoinTable')
+                    src.unschedule_property_annotation(prop, '@JoinColumn')
                     src.unschedule_property_annotation(prop, '@OneToMany')
                     new_ann = JavaAnn('@OneToMany', one_to_many.params + ['mappedBy = "' + peer_prop + '"'])
                     src.schedule_property_annotation(prop, new_ann)
