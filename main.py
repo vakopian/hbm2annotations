@@ -160,6 +160,7 @@ def collection_field(src, collection, many_to_many=False):
     args = []
     join_table_args = []
     join_column_args = []
+    inv_join_column_args = []
     name = collection.get('name')
     if not name:
         raise Exception('BAD tag ' + str(collection))
@@ -205,9 +206,24 @@ def collection_field(src, collection, many_to_many=False):
     rel = collection.find('many-to-many')
     if rel:
         many_to_many = (rel.get('unique') != 'true')
-        inverse_join_column = rel.get('column')
-        if inverse_join_column:
-            join_table_args.append('inverseJoinColumns = {@JoinColumn(name = "' + inverse_join_column + '")}')
+        inverse_join_column_name = rel.get('column')
+        if not inverse_join_column_name:
+            rel_col = rel.find('column')
+            if rel_col:
+                inverse_join_column_name = rel_col.get('name')
+
+        inverse_join_column_not_null = rel.get('not-null')
+        if not inverse_join_column_not_null:
+            rel_col = rel.find('column')
+            if rel_col:
+                inverse_join_column_not_null = rel_col.get('not-null')
+
+        if inverse_join_column_name:
+            inv_join_column_args.append('name = "' + inverse_join_column_name + '"')
+        if inverse_join_column_not_null == 'true':
+            inv_join_column_args.append('nullable = false')
+        if inv_join_column_args:
+            join_table_args.append('inverseJoinColumns = {@JoinColumn(' + ', '.join(inv_join_column_args) + ')}')
     else:
         rel = collection.find('one-to-many')
         if rel:
@@ -248,13 +264,12 @@ def collection_field(src, collection, many_to_many=False):
     if order_by:
         src.schedule_property_annotation(name, JavaAnn('@OrderBy', '"' + order_by + '"'))
 
-    if not mapped_by:
-        if join_table_args:
-            if join_column_args:
-                join_table_args.append('joinColumns = {@JoinColumn(' + ', '.join(join_column_args) + ')}')
-            src.schedule_property_annotation(name, JavaAnn('@JoinTable', join_table_args))
-        elif join_column_args:
-            src.schedule_property_annotation(name, JavaAnn('@JoinColumn', join_column_args))
+    if not many_to_many and join_column_args:
+        src.schedule_property_annotation(name, JavaAnn('@JoinColumn', join_column_args))
+    elif not mapped_by and join_table_args:
+        if join_column_args:
+            join_table_args.append('joinColumns = {@JoinColumn(' + ', '.join(join_column_args) + ')}')
+        src.schedule_property_annotation(name, JavaAnn('@JoinTable', join_table_args))
 
     if many_to_many:
         ann = '@ManyToMany'
@@ -511,15 +526,16 @@ def link_peer_fields(sources):
             if matches:
                 if len(matches) == 1:
                     peer_prop, many_to_one = matches[0]
-                    print "!!!FOUND match for " + cls_name + "." + prop + " in " + one_to_many.target_class + '.' +  peer_prop
+                    print "!!!FOUND match for " + cls_name + "." + prop + " in " + one_to_many.target_class + '.' + peer_prop
                     src.unschedule_property_annotation(prop, '@JoinColumn')
+                    src.unschedule_property_annotation(prop, '@JoinTable')
                     src.unschedule_property_annotation(prop, '@OneToMany')
                     new_ann = JavaAnn('@OneToMany', one_to_many.params + ['mappedBy = "' + peer_prop + '"'])
                     src.schedule_property_annotation(prop, new_ann)
                 else:
                     raise Exception("more than one matches found for " + cls_name + "." + prop + " in " + one_to_many.target_class)
             else:
-                print "........ could not find match for " + cls_name + "." + prop + " in " + one_to_many.target_class
+                src.schedule_property_annotation(prop, JavaAnn('// todo: consider making bi-directional to ' + one_to_many.target_class + '.' + inverse_key_column_to_property(one_to_many.join_column)))
 
 
 
